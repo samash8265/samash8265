@@ -1,0 +1,536 @@
+library(locfit)
+library(NBAloveR)
+library(devtools)
+library(dplyr)
+library(readr)
+library(ggplot2)
+library(stringr)
+library(tidyr)
+library(zoo)
+library(data.table)
+library(locfit)
+library(chron)
+library(tidyverse)
+library(readxl)
+library(questionr)
+library(tree)
+
+
+
+#Play by play data from 2019 season to 2016 season
+pbp2019 <- read.csv("NBA-PBP-2019-2020.csv",header = TRUE, sep=",")
+pbp2018 <- read.csv("NBA-PBP-2018-2019.csv",header = TRUE, sep=",")
+pbp2017 <- read.csv("NBA-PBP-2017-2018.csv",header = TRUE, sep=",")
+pbp2016 <- read.csv("NBA-PBP_2016-2017.csv",header = TRUE, sep=",")
+
+#create a main pbp data frame with the seasons stacked on top of each other
+#(lots of data) 
+pbp <- rbind(pbp2016,pbp2017,pbp2018,pbp2019)
+
+#NBA Sport odds from 2019 season to 2016 season
+nbaodds16 <- read.csv("1617odds.csv",header=TRUE,sep=",")
+nbaodds17 <- read.csv("1718odds.csv",header=TRUE,sep=",")
+nbaodds18 <- read.csv("1819odds.csv",header=TRUE,sep=",")
+nbaodds19 <- read.csv("1920odds.csv",header=TRUE,sep=",")
+
+#Creation of a main nba odds dataframe with the seasons stacked together
+nbaodds <- rbind(nbaodds16, nbaodds17, nbaodds18, nbaodds19)
+
+#ABBREVIATION OF TEAM NAMES FOR THE ODDS DATA, found on StatsExchange
+abbreviateodds <- function(column) {
+  str_replace_all(column, "NewOrleans", "NOP") %>%
+    str_replace_all("Toronto", "TOR") %>%
+    str_replace_all("LALakers", "LAL") %>%
+    str_replace_all("LAClippers", "LAC") %>%
+    str_replace_all( "Detroit", "DET") %>%
+    str_replace_all( "Indiana", "IND") %>%
+    str_replace_all("Cleveland", "CLE") %>%
+    str_replace_all( "Minnesota", "MIN") %>%
+    str_replace_all( "Miami", "MIA") %>%
+    str_replace_all( "Boston", "BOS") %>%
+    str_replace_all( "Orlando", "ORL") %>%
+    str_replace_all( "Charlotte", "CHA") %>%
+    str_replace_all( "SanAntonio", "SAS") %>%
+    str_replace_all( "Memphis", "MEM") %>%
+    str_replace_all( "NewYork", "NYK") %>%
+    str_replace_all( "Brooklyn", "BRK") %>%
+    str_replace_all( "Chicago", "CHI") %>%
+    str_replace_all( "Philadelphia", "PHI") %>%
+    str_replace_all( "Dallas", "DAL") %>%
+    str_replace_all( "OklahomaCity", "OKC") %>%
+    str_replace_all( "Utah", "UTA") %>%
+    str_replace_all( "Sacramento", "SAC") %>%
+    str_replace_all( "Phoenix", "PHO") %>%
+    str_replace_all( "Denver", "DEN") %>%
+    str_replace_all( "Portland", "POR") %>%
+    str_replace_all( "Atlanta", "ATL") %>%
+    str_replace_all( "Milwaukee", "MIL") %>%
+    str_replace_all( "Houston", "HOU") %>%
+    str_replace_all( "Washington", "WAS") %>%
+    str_replace_all( "GoldenState", "GSW") 
+}
+#Change the team names to the abbreviation so that it matches pbp data
+nbaodds$Team <- abbreviateodds(nbaodds$Team)
+
+pbp$AwayTeam <- str_replace_all(pbp$AwayTeam, "CHO", "CHA")
+pbp$HomeTeam <- str_replace_all(pbp$HomeTeam, "CHO", "CHA")
+pbp$WinningTeam <- str_replace_all(pbp$WinningTeam, "CHO", "CHA")
+
+#Change the seconds left variable in pbp data frame
+#Used to be seconds left in each quarter
+#Now is seconds left in each game
+pbp$SecLeft = pbp$SecLeft + (4-pbp$Quarter)*720
+
+pbp<- pbp[-c(739875:740299),]
+
+for(i in 1:2298876) {
+  if(pbp$Quarter[i] > 4) {
+    pbp$SecLeft[i] = pbp$SecLeft[i] + 720
+    next
+  }
+  else {
+    next 
+  }
+}
+
+
+#Collect the GameID from the URL section of the pbp dataframe
+pbp$GameID = substr(pbp$URL,12,20)
+
+#Get the score differential by subtracting Away Team's score from the Home's
+pbp$PointDiff <- as.numeric(pbp$AwayScore) - as.numeric(pbp$HomeScore)
+
+#Visitor has possession of the ball
+pbp$PossessionVisitor <- as.integer(nchar(pbp$AwayPlay) > 0)
+pbp$PossessionVisitor <- as.numeric(pbp$PossessionVisitor)
+
+
+#Tracker of the turnovers that occur
+pbp$Turnover <- as.integer(nchar(pbp$TurnoverType) > 0)
+pbp$Turnover <- as.numeric(pbp$Turnover)
+
+#Some of the variables aren't change of score, to prevent
+#that we can remove any variable that isn't numerical
+pbp <- pbp[grep('^\\d+$', pbp$AwayScore),]
+pbp <- pbp[grep('^\\d+$', pbp$HomeScore),]
+
+#Defensive Rebound/Offensive Rebound trackers
+pbp$DefensiveRebound <- ifelse(pbp$ReboundType == "defensive",
+                               1, 0)
+pbp$OffensiveRebound <- ifelse(pbp$ReboundType == "offensive",
+                               1,0)
+#Re-order the pbp data frame and get rid of useless columns
+#Do not mess with this pbp
+pbp <- pbp[,c(41,4,12,9,6,7,8,14,11,42,43,44,45,46)]
+
+
+library(lubridate)
+#Convert to a more numerical Date. E.g. October 21 2020 to 10-21-2020
+pbp$newdate <- mdy(pbp$Date)
+pbp <- pbp[,c(1,15,3,4,5,6,7,8,9,10,11,12,13,14)]
+names(pbp)[2]<-paste("Date")
+
+#Add a binary Visitor Win variable that checks to see what the winning team
+#is and if it is the away team then the visitorWin variable will be assigned
+#a 1 for that game
+pbp$visitorWin <- ifelse(pbp$WinningTeam == pbp$AwayTeam, 1,0)
+
+
+#For Loop to add a zero in front of date's that only have 3 characters
+#which helps with converting it. E.g. Date: 109 = January 9th after
+#conversion Date: 0109.
+for (i in 1:10152){
+  if(nchar(nbaodds$Date[i])== 3)
+    { 
+      nbaodds$Date[i] = paste0("0",nbaodds$Date[i])
+      next
+    }
+  else
+    {
+      next 
+    }
+  }
+
+#In the opening point spread the variable "pk" refers to
+# a spread of 0 points, so instead of it being "pk", we 
+#will change it to 0.
+for (i in 1:10152){
+  if((nbaodds$Open[i])== "pk")
+  { 
+    nbaodds$Open[i] = 0
+    next
+  }
+  else
+  {
+    next 
+  }
+}
+
+#Converting Line Odds Date to match up with the pbp data
+#First half of 2016 odds dates
+odds16first <- as.numeric(nbaodds$Date[1:1012])
+odds16first <- as.Date(sprintf('2016%04d',odds16first),format="%Y%m%d")
+
+#Second half of 2016 odds dates
+odds16second <- as.numeric(nbaodds$Date[1013:2618])
+odds16second <- as.Date(sprintf('2017%04d',odds16second),format="%Y%m%d")
+
+#First half of 2017 odds date
+odds17first <- as.numeric(nbaodds$Date[2619:3706])
+odds17first <- as.Date(sprintf('2017%04d',odds17first),format="%Y%m%d")
+
+#Second half of 2018 odds date
+odds17second <- as.numeric(nbaodds$Date[3707:5242])
+odds17second <- as.Date(sprintf('2018%04d',odds17second),format="%Y%m%d")
+
+#First half of 2018 odds data
+odds18first <- as.numeric(nbaodds$Date[5243:6338])
+odds18first <- as.Date(sprintf('2018%04d',odds18first),format="%Y%m%d")
+
+#Second half of 2018 odds data
+odds18second <- as.numeric(nbaodds$Date[6339:7866])
+odds18second <- as.Date(sprintf('2019%04d',odds18second),format="%Y%m%d")
+
+#First of 2019 odds date
+odds19first <- as.numeric(nbaodds$Date[7867:8872])
+odds19first <- as.Date(sprintf('2019%04d',odds19first),format="%Y%m%d")
+
+#Second half of 2019 odds date
+odds19second <- as.numeric(nbaodds$Date[8873:10152])
+odds19second <- as.Date(sprintf('2020%04d',odds19second),format="%Y%m%d")
+
+#putting together all the odds date into one dataframe
+blah <- c(odds16first, odds16second,odds17first,odds17second,
+            odds18first, odds18second, odds19first, odds19second)
+
+#adding the new dates into the nbaodds data frame
+nbaodds$newdate <- blah
+
+#Removing the playoff games from 2020 as they happened
+#In a neutral location and can be considered outliers
+#for future NBA games.
+nbaodds <- nbaodds[!(nbaodds$VH == "N"),]
+nbaodds <- nbaodds[,c(7,2,3,4,5,6)]
+names(nbaodds)[1]<-paste("Date")
+
+#Reshape the nba odds data so that the data follows the 
+#same format as the pbp data
+nbaodds1 <- nbaodds[1:3]
+nbaodds2 <- nbaodds[c(1,2,4)]
+
+t<- nbaodds1  %>% 
+  dplyr::mutate(ID = dplyr::row_number()) %>% 
+  dplyr::mutate(ID = ifelse(ID %% 2 == 0, ID - 1, ID)) %>% 
+  tidyr::pivot_wider(names_from = VH, values_from = Team)
+t2<- nbaodds2  %>% 
+  dplyr::mutate(ID = dplyr::row_number()) %>% 
+  dplyr::mutate(ID = ifelse(ID %% 2 == 0, ID - 1, ID)) %>% 
+  tidyr::pivot_wider(names_from = VH, values_from = Open)
+
+reshape <- left_join(t, t2, by = c("Date", "ID"))
+
+#Change more column names to make it more readable.
+setnames(reshape, old = c('V.x', 'H.x', 'V.y','H.y'),
+         new = c('AwayTeam','HomeTeam','AwayOpen','HomeOpen'))
+
+reshape$HomeOpen <- as.numeric(reshape$HomeOpen)
+reshape$AwayOpen <- as.numeric(reshape$AwayOpen)
+
+reshape$VisPointSpread <- ifelse(reshape$AwayOpen >= reshape$HomeOpen,
+                              as.numeric(reshape$HomeOpen)*-1,
+                              reshape$AwayOpen)
+
+#Combine the two data sets based on matching Date,
+#AwayTeam, and HomeTeam variables
+pbp <- left_join(pbp, reshape, by = c("AwayTeam",
+                                      "HomeTeam",
+                                      "Date"),
+                 all.x=TRUE)
+pbp[16] <- NULL
+
+pbp$HomeOpen <- as.numeric(pbp$HomeOpen)
+pbp$AwayOpen <- as.numeric(pbp$AwayOpen)
+
+#Training Set from 2016/17, 2017/18, and 2018/19 season
+trainingSET <- filter(pbp, Date <= as.Date("2019-10-01") )
+trainingSET <- trainingSET[complete.cases(trainingSET$VisPointSpread),]
+
+#Cross validation set from 2019-20 season
+crossvalidSET <- filter(pbp, Date > as.Date("2019-10-16"))
+crossvalidSET <- crossvalidSET[complete.cases(crossvalidSET$VisPointSpread),]
+
+traintest <- locfit(visitorWin ~ SecLeft+ VisPointSpread+
+                      PointDiff + PossessionVisitor + Turnover,
+                    family = binomial,
+                    data = trainingSET)
+
+logisticTest <- glm(visitorWin ~ SecLeft+ VisPointSpread+
+                      PointDiff + PossessionVisitor + Turnover,
+                    family = binomial, 
+                    data=trainingSET)
+                        
+#Smoothing windows for each quarter, and then the 4th quarter
+#has 3 smoothing windows to have more accurate reflection
+#of the effects of variables with not a lot of tiem remaining
+quarter_1 <- filter(trainingSET, Quarter == 1)
+quarter_2 <- filter(trainingSET, Quarter == 2)
+quarter_3 <- filter(trainingSET, Quarter == 3)
+quarter_4 <- filter(trainingSET, Quarter == 4, SecLeft <= 720, SecLeft > 120)
+quarter_4_2 <- filter(trainingSET, Quarter == 4,SecLeft <= 120)
+quarter_OT <- filter(trainingSET, Quarter > 4)
+
+quarter_other <- filter(trainingSET, Quarter <= 4, SecLeft > 120)
+
+quarter <- rbind(quarter_1, quarter_2, quarter_3,
+                 quarter_4, quarter_4_2, quarter_OT)
+
+#Training Models for each quarter
+q1_train <- locfit(visitorWin ~ SecLeft+ VisPointSpread+
+                     PointDiff + PossessionVisitor + Turnover,
+                   family = binomial,
+                   data = quarter_1)
+q2_train <- locfit(visitorWin ~ SecLeft+VisPointSpread+
+                   PointDiff + PossessionVisitor + 
+                     Turnover,
+                   family = binomial,
+                   data = quarter_2)
+q3_train <- locfit(visitorWin ~ SecLeft+ VisPointSpread+
+                   PointDiff + PossessionVisitor + 
+                     Turnover,
+                   family = binomial,
+                   data = quarter_3)
+q4_train <- locfit(visitorWin ~ SecLeft+VisPointSpread+
+                   PointDiff + PossessionVisitor + 
+                     Turnover, 
+                   family = binomial,
+                   data = quarter_4)
+q4_2_train <- locfit(visitorWin ~ PointDiff, 
+                     family = binomial,
+                     data = quarter_4_2)
+OT_train <- locfit(visitorWin ~ SecLeft+ 
+                    PointDiff , 
+                    family = binomial,
+                    data = quarter_OT)
+
+other_train <- locfit(visitorWin ~ SecLeft+VisPointSpread+
+                        PointDiff + PossessionVisitor + 
+                        Turnover, 
+                      family = binomial,
+                      data = quarter_other)
+
+#Make cross-validations for each quarter
+cv_1 <- filter(crossvalidSET, Quarter == 1)
+cv_2 <- filter(crossvalidSET, Quarter == 2)
+cv_3 <- filter(crossvalidSET, Quarter == 3)
+cv_4 <- filter(crossvalidSET, Quarter == 4,SecLeft <= 720, SecLeft >120)
+cv_4_2 <- filter(crossvalidSET, Quarter == 4,SecLeft <= 120)
+cv_OT <- filter(crossvalidSET, Quarter > 4)
+
+cv_other <- filter(crossvalidSET, Quarter <= 4, SecLeft > 120)
+
+crossvalQuarterlySET <- rbind(cv_1, cv_2, cv_3,
+                              cv_4, cv_4_2, cv_OT)
+
+#Quarter 1 Cross-Validation
+cv_1$awayProb <- predict(q1_train, cv_1, type = "response")
+cv_1$homeProb <- 1 - cv_1$awayProb
+
+#Quarter 2 Cross-Validation
+cv_2$awayProb <- predict(q2_train, cv_2, type = "response")
+cv_2$homeProb <- 1 - cv_2$awayProb
+
+
+#Quarter 3 Cross-Validation
+cv_3$awayProb <- predict(q3_train, cv_3, type = "response")
+cv_3$homeProb <- 1 - cv_3$awayProb
+
+
+#Quarter 4 First Cross-Validation
+cv_4$awayProb <- predict(q4_train, cv_4, type = "response")
+cv_4$homeProb <- 1 - cv_4$awayProb
+
+
+#Quarter 4 Second Cross-Validation
+cv_4_2$awayProb <- predict(q4_2_train, cv_4_2, type = "response")
+cv_4_2$homeProb <- 1 - cv_4_2$awayProb
+
+#Since 0 seconds left happens in this cross-val we only
+#need to include this mutate function to make sure the game
+#finishes at a win awayProbabilty of either 1 or 0
+cv_4_2 <- mutate(cv_4_2, awayProb = 
+                 ifelse(SecLeft == 0 & PointDiff > 0, 1,
+                        ifelse(SecLeft == 0 & PointDiff<0, 0,
+                               ifelse(awayProb > 1, 1, 
+                                      ifelse(awayProb < 0, 0, awayProb)))),
+               homeProb = 1 - awayProb)
+
+cv_OT$awayProb <- predict(OT_train, cv_OT, type = "response")
+cv_OT$homeProb <- 1 - cv_OT$awayProb
+#Since 0 seconds left happens in this cross-val we only
+#need to include this mutate function to make sure the game
+#finishes at a win awayProbabilty of either 1 or 0
+cv_OT <- mutate(cv_OT, awayProb = 
+                   ifelse(SecLeft == 0 & PointDiff > 0, 1,
+                          ifelse(SecLeft == 0 & PointDiff<0, 0,
+                                 ifelse(awayProb > 1, 1, 
+                                        ifelse(awayProb < 0, 0, awayProb)))),
+                 homeProb = 1 - awayProb)
+
+crossval <- rbind(cv_1, cv_2, cv_3, cv_4,cv_4_2,cv_OT)
+
+cv_other$awayProb <- predict(other_train, cv_other, type = "response")
+cv_other$homeProb <- 1 - cv_other$awayProb
+
+Pred <- predict(logisticTest, trainingSET, type = "response")
+Pred2 <- predict(traintest, trainingSET, type = "response")
+
+df <- data.frame(Pred, Pred2, crossval)
+df2 <- data.frame(trainingSET$visitorWin)
+df3 <- data.frame(crossval$awayProb, crossval$visitorWin)
+df4 <- data.frame(cv_4_2$awayProb, cv_4_2$visitorWin)
+df5 <- data.frame(cv_other$awayProb, cv_other$visitorWin)                 
+
+library(MLmetrics)
+
+#Brier Score for Logistic Regression
+mean((df$Pred - df2$trainingSET.visitorWin)^2)
+LogLoss(df$Pred, df2$trainingSET.visitorWin)
+
+#Brier Score for Local Logistic Regression
+mean((df$Pred2 - df2$trainingSET.visitorWin)^2)
+LogLoss(df$Pred2, df2$trainingSET.visitorWin)
+
+#Brier SCore for Local Logistic Regression with Smoothing Windows
+mean((df3$crossval.awayProb - 
+        df3$crossval.visitorWin)^2)
+
+
+
+#Brier Score for Last 2 minutes
+mean((df4$cv_4_2.awayProb - df4$cv_4_2.visitorWin)^2)
+LogLoss(df4$cv_4_2.awayProb, df4$cv_4_2.visitorWin)
+
+
+
+mean((df5$cv_other.awayProb - df5$cv_other.visitorWin)^2)
+
+??LogLoss
+#From the anova we can take out the rebound variables as they don't affect
+#the outcome of the game as much as the other ones.
+anova(logisticTest, test = "Chisq")
+summary(logisticTest)
+
+
+#Get team colors library to make graphs look better
+library(teamcolors)
+
+nba_pallete <- league_pal("nba",1)
+nba_pallete
+
+#ENTER THE GAME YOU WANT TO ACCESS HERE BY PUTTING IN THE GAME ID AND
+#THE AWAY TEAM
+winprob <- filter(crossval, GameID == "201911100", 
+                  AwayTeam == "TOR")
+
+#Rough plot of the game right now.
+library(gganimate)
+
+ggplot() + 
+  geom_line(winprob, mapping = aes(SecLeft, awayProb,col = "TOR"),size=1) +
+  geom_line(winprob, mapping = aes(SecLeft, homeProb,col = "LAL"),size=1) +
+  scale_x_reverse(breaks = c(0, 720, 1440, 2160, 2880),
+                  labels = c("Final","4","3","2","1")) +
+  scale_color_manual(values = c("#fdb927","#ce1141")) +
+  geom_hline(yintercept=.50, linetype="twodash",col="black")+
+  scale_y_continuous(labels = scales::percent) +
+  theme_minimal() +
+  theme(panel.grid.major.x  = element_line(size=.5, linetype = "twodash",
+                                        color = "darkgrey")) +
+  xlab("Quarter") +
+  ylab("Win awayProbability") +
+  ggtitle("Lakers vs. Toronto") 
+  
+
+#ESPN'S WIN PROBABILITY MODEL
+library(nbastatR)
+
+espnModel <- win_probability(c(0021900139))
+
+ggplot()+
+  geom_line(data = espnModel, aes(x=espnModel$minuteGame,
+                                    y = espnModel$pctWinProbAway,
+                                    col = "TOR"))+
+  geom_line(data = espnModel, aes(x=espnModel$minuteGame,
+                                    y = espnModel$pctWinProbHome,
+                                    col = "LAL"))+
+  scale_x_continuous(breaks = c(0, 720, 1440, 2160, 2880),
+                  labels = c("Final","4","3","2","1")) +
+  scale_color_manual(values = c("#fdb927","#ce1141")) +
+  geom_hline(yintercept=.50, linetype="twodash",col="black")+
+  scale_y_continuous(labels = scales::percent) +
+  theme_minimal() +
+  theme(panel.grid.major.x  = element_line(size=.5, linetype = "twodash",
+                                           color = "darkgrey")) +
+  xlab("Quarter") +
+  ylab("Win awayProbability") +
+  ggtitle("Lakers vs. Toronto") 
+
+
+#Error Calculation
+crossval <- mutate(crossval,
+                   error = visitorWin - awayProb, 
+                   sqrerr = error^2, 
+                   minerror = round(SecLeft,10))
+
+error <- group_by(crossval, minerror) %>%
+  summarise(count=n(), 
+            MeanSqrErr = sqrt(mean(sqrerr)))
+
+ggplot(error, aes(minerror, MeanSqrErr)) + 
+  geom_bar(stat="identity") + scale_x_reverse()
+
+#League progression over the years.
+nba <- read.csv("NBA stats.csv", header = T, sep = ",")
+
+nba$Season <- as.numeric(nba$Season)
+
+
+ggplot(nba, aes(x = Season, y = PTS)) +
+  geom_line(color = "red",
+            size = 1.2) +
+  scale_x_continuous(breaks = scales::pretty_breaks(n=10)) +
+  theme(axis.text.x = element_text(angle = 45)) +
+  ylab("Points (per game)") +
+  ggtitle("Points Over Time")+
+  labs(caption = "https://www.basketball-reference.com/leagues/NBA_stats_per_game.html")
+  theme_minimal() +
+    
+
+ggplot(nba, aes(x = Season, y = eFG.)) +
+  geom_line(color = "blue",
+            size = 1.2) +
+  scale_x_continuous(breaks = scales::pretty_breaks(n=10)) +
+  theme(axis.text.x = element_text(angle = 45)) +
+  ylab("Effective Field Goal %") +
+  ggtitle("eFG% Over Time") +
+  labs(caption = "https://www.basketball-reference.com/leagues/NBA_stats_per_game.html")
+  theme_minimal()
+
+ggplot(nba, aes(x = Season, y = Pace)) +
+  geom_line(color = "green",
+            size = 1.2) +
+  scale_x_continuous(breaks = scales::pretty_breaks(n=10)) +
+  theme(axis.text.x = element_text(angle = 45)) +
+  ylab("Pace (Average Possessions per Game)")+
+  ggtitle("Pace Over Time") +
+  labs(caption = "https://www.basketball-reference.com/leagues/NBA_stats_per_game.html")
+  theme_minimal() 
+  
+    
+
+
+
+
+
+
+
